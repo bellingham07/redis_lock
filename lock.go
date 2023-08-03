@@ -48,6 +48,7 @@ func NewRedisLock(key string, client *Client, opts ...LockOption) *RedisLock {
 
 // Lock 加锁.
 func (r *RedisLock) Lock(ctx context.Context) (err error) {
+	// 做了一层兜底，确保在我获取锁失败的情况下，我不会开启看门狗
 	defer func() {
 		if err != nil {
 			return
@@ -99,13 +100,25 @@ func (r *RedisLock) watchDog(ctx context.Context) {
 	}
 
 	// 2. 确保之前启动的看门狗已经正常回收
+	//CompareAndSwapInt32对int32值执行比较和交换操作。
+	//考虑使用更符合人体工程学且不易出错的[Int32.CompareAndSwap]。
+	// 显示的置为1，以告诉他人，当前正在有看门狗在运行
 	for !atomic.CompareAndSwapInt32(&r.runningDog, 0, 1) {
 	}
 
 	// 3. 启动看门狗
+	//WithCancel返回带有新“完成”通道的父级的副本。返回的
+	//调用返回的cancel函数时，上下文的Done通道将关闭
+	//或者当父上下文的“完成”通道关闭时，以先发生的为准。
+	//取消此上下文将释放与其关联的资源，因此代码应该
+	//在该上下文中运行的操作完成后立即调用cancel。
+	// 将终止控制器赋值给redis.stopDog
 	ctx, r.stopDog = context.WithCancel(ctx)
+
+	// 真正启动一个看门狗的goroutine
 	go func() {
 		defer func() {
+			// 如果当前看门狗要退出，显示修改看门狗的flag，告诉其他人，当前没有看门狗开启
 			atomic.StoreInt32(&r.runningDog, 0)
 		}()
 		r.runWatchDog(ctx)
@@ -118,6 +131,7 @@ func (r *RedisLock) runWatchDog(ctx context.Context) {
 
 	for range ticker.C {
 		select {
+		// redis.stopDog 被上层用户显示的执行，此时看门狗结束，结束轮询
 		case <-ctx.Done():
 			return
 		default:
